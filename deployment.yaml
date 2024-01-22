@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prepare-data
+spec:
+  selector:
+    matchLabels:
+      app: prepare-data
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: prepare-data
+    spec:
+      containers:
+      - name: prepare-data
+        image: stable-diffusion
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/prepare-data.py"]
+        volumeMounts:
+        - mountPath: /content/stable-diffusion-webui/models
+          name: data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: benchmark-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: benchmark-data
+spec:
+  storageClassName: manual
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: benchmark-data
+  namespace: kubeflow
+  labels:
+    type: local
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 30Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    # mount a nfs volume to the kind nodes
+    path: "/mnt/stable-diffusion-models"
