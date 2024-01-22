@@ -24,6 +24,8 @@ realesrgan
 requests
 resize-right
 
+vineyard
+vineyard-ml
 safetensors
 scikit-image>=0.19
 timm

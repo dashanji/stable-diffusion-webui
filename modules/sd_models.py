@@ -5,6 +5,7 @@ import threading
 
 import torch
 import re
+import time
 import safetensors.torch
 from omegaconf import OmegaConf, ListConfig
 from os import mkdir
@@ -301,16 +302,21 @@ def read_state_dict(checkpoint_file, print_global_state=False, map_location=None
         device = map_location or shared.weight_load_location or devices.get_optimal_device_name()
 
         if not shared.opts.disable_mmap_load_safetensors:
-            pl_sd = safetensors.torch.load_file(checkpoint_file, device=device)
+            print(f"*****Loading weights step1")
+            pl_sd = safetensors.torch.load(open(checkpoint_file, 'rb').read())
+            #pl_sd = safetensors.torch.load_file(checkpoint_file, device=device)
         else:
+            print(f"*****Loading weights step2")
             pl_sd = safetensors.torch.load(open(checkpoint_file, 'rb').read())
             pl_sd = {k: v.to(device) for k, v in pl_sd.items()}
     else:
+        print(f"*****Loading weights step3")
         pl_sd = torch.load(checkpoint_file, map_location=map_location or shared.weight_load_location)
 
     if print_global_state and "global_step" in pl_sd:
         print(f"Global Step: {pl_sd['global_step']}")
 
+    print(f"*****Loading weights step4")
     sd = get_state_dict_from_checkpoint(pl_sd)
     return sd
 
@@ -327,7 +333,23 @@ def get_checkpoint_state_dict(checkpoint_info: CheckpointInfo, timer):
         return checkpoints_loaded[checkpoint_info]
 
     print(f"Loading weights [{sd_model_hash}] from {checkpoint_info.filename}")
-    res = read_state_dict(checkpoint_info.filename)
+    start_time = time.time()
+    #res = read_state_dict(checkpoint_info.filename)
+    import vineyard
+    from vineyard.contrib.ml.torch import torch_context
+    #os.system('sync; sudo echo 3 > /proc/sys/vm/drop_caches')
+    start_time = time.time()
+    client = vineyard.connect("/tmp/vineyard_test.sock1")
+    res = None
+    with torch_context():
+        try:
+            print("########get_checkpoint_state_dict from vineyard#########", checkpoint_info.filename)
+            res = client.get(name=(checkpoint_info.filename))
+        except Exception as e:
+            print("########get_checkpoint_state_dict from file#########")
+            res = read_state_dict(checkpoint_info.filename)
+    end_time = time.time()
+    print(f"Loaded weights in {end_time - start_time} seconds")
     timer.record("load weights from disk")
 
     return res
@@ -356,6 +378,7 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         shared.opts.data["sd_model_checkpoint"] = checkpoint_info.title
 
     if state_dict is None:
+        print("########get_checkpoint_state_dict#########")
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
 
     model.is_sdxl = hasattr(model, 'conditioner')
@@ -372,7 +395,21 @@ def load_model_weights(model, checkpoint_info: CheckpointInfo, state_dict, timer
         # cache newly loaded model
         checkpoints_loaded[checkpoint_info] = state_dict.copy()
 
+    import time
     model.load_state_dict(state_dict, strict=False)
+    import vineyard
+    from vineyard.contrib.ml.torch import torch_context
+    start_time = time.time()
+    client = vineyard.connect("/tmp/vineyard_test.sock1")
+    with torch_context():
+        try:
+            client.get_name(checkpoint_info.filename)
+        except Exception as e:
+            print("########put to vineyard#########", checkpoint_info.filename)
+            client.put(model, name=(checkpoint_info.filename), persist=True)
+            
+    end_time = time.time()
+    print(f"put state to vineyard in {end_time - start_time} seconds")
     timer.record("apply weights to model")
 
     del state_dict
@@ -610,10 +647,17 @@ def load_model(checkpoint_info=None, already_loaded_state_dict=None):
 
     timer.record("unload existing model")
 
+
     if already_loaded_state_dict is not None:
+        print(f"#######already_loaded_state_dict is not None, loading model from it#######")
         state_dict = already_loaded_state_dict
     else:
+        print(f"#######get_checkpoint_state_dict is not None, loading model from it#######")
+        import time
+        start_time = time.time()
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
+        end_time = time.time()
+        print(f"get_checkpoint_state_dict in {end_time - start_time} seconds")
 
     checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
     clip_is_included_into_sd = any(x for x in [sd1_clip_weight, sd2_clip_weight, sdxl_clip_weight, sdxl_refiner_clip_weight] if x in state_dict)
@@ -772,6 +816,8 @@ def reload_model_weights(sd_model=None, info=None):
 
     state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
 
+
+
     checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
 
     timer.record("find config")
@@ -784,6 +830,7 @@ def reload_model_weights(sd_model=None, info=None):
         return model_data.sd_model
 
     try:
+        print(f"###Loading weights from {checkpoint_info.filename}")
         load_model_weights(sd_model, checkpoint_info, state_dict, timer)
     except Exception:
         print("Failed to load checkpoint, restoring previous")
